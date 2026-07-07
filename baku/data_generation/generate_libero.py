@@ -179,8 +179,12 @@ def main():
             converted = render_demo_file(
                 task_file, task_suite, lang_model, args.img_size
             )
-            with save_data_path.open("wb") as handle:
+            tmp_save_data_path = save_data_path.with_suffix(
+                save_data_path.suffix + ".tmp"
+            )
+            with tmp_save_data_path.open("wb") as handle:
                 pkl.dump(converted, handle)
+            tmp_save_data_path.replace(save_data_path)
             print(f"Saved to {save_data_path}", flush=True)
             tasks_stored += 1
 
