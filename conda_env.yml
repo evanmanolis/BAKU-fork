@@ -38,6 +38,6 @@ dependencies:
     - tqdm
     - einops==0.7.0
     - decord
-    - mujoco
+    - mujoco==2.3.7
     - dm_control
     - diffusers==0.11.1

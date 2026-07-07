@@ -24,6 +24,14 @@ This verifies:
 - RLB matrix-group collection.
 - One MatrixPolicy optimizer step.
 
+For LIBERO rendering on Lambda, the smoke-tested stack used:
+
+- `libnvidia-gl-580-server` so GLVND exposes NVIDIA EGL.
+- Ubuntu user membership in `render` and `video`.
+- `mujoco==2.3.7` with `robosuite==1.4.0`.
+- `diffusers==0.11.1`, matching this repo's original environment pin.
+- `einops==0.7.0`, required by the imported VQ-BET utilities.
+
 ## LIBERO-90 Comparison Grid
 
 Convert the raw LIBERO HDF5 demonstrations into the BAKU pickle format first:
