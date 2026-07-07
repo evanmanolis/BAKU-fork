@@ -95,6 +95,12 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--text-only-max-state-dim",
+        type=int,
+        default=123,
+        help="Feature padding width to use with --text-only-eval for LIBERO-90.",
+    )
+    parser.add_argument(
         "--num-demos-per-task",
         type=int,
         default=50,
@@ -171,6 +177,7 @@ def eval_checkpoint(args, variant, step):
     ]
     if args.text_only_eval:
         cmd.append("text_only_eval=true")
+        cmd.append(f"text_only_max_state_dim={args.text_only_max_state_dim}")
     run_command(cmd, cwd=BAKU_DIR, dry_run=args.dry_run)
 
 
