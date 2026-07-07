@@ -19,6 +19,11 @@ from video import VideoRecorder
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 torch.backends.cudnn.benchmark = True
+if torch.cuda.is_available():
+    try:
+        torch.backends.cuda.preferred_linalg_library("magma")
+    except RuntimeError:
+        pass
 
 
 def make_agent(obs_spec, action_spec, cfg):
