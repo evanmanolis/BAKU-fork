@@ -61,7 +61,9 @@ class BCDataset(IterableDataset):
                     paths[idx] = path
                     idx2name[idx] = task
             del self._paths
-            self._paths = paths
+            self._paths = {
+                new_idx: paths[old_idx] for new_idx, old_idx in enumerate(sorted(paths))
+            }
 
         # store actions
         if store_actions:

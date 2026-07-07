@@ -26,6 +26,19 @@ This verifies:
 
 ## LIBERO-90 Comparison Grid
 
+Convert the raw LIBERO HDF5 demonstrations into the BAKU pickle format first:
+
+```bash
+cd /path/to/BAKU
+MUJOCO_GL=egl PYOPENGL_PLATFORM=egl python baku/data_generation/generate_libero.py \
+  --dataset-path /path/to/LIBERO/libero/datasets \
+  --save-path /path/to/BAKU/expert_demos/libero \
+  --benchmarks libero_90
+```
+
+For a smoke conversion, add `--max-tasks-per-benchmark 1` and write to a
+temporary `--save-path`.
+
 The sweep script uses LIBERO-90 explicitly and saves checkpoints at every 5k step
 through 100k:
 
