@@ -2,6 +2,7 @@
 
 import warnings
 import os
+import gc
 
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 os.environ["MUJOCO_GL"] = "egl"
@@ -38,6 +39,13 @@ def make_agent(obs_spec, action_spec, cfg):
     return hydra.utils.instantiate(cfg.agent)
 
 
+def close_envs(envs):
+    for env in envs:
+        close = getattr(env, "close", None)
+        if close is not None:
+            close()
+
+
 class WorkspaceIL:
     def __init__(self, cfg):
         self.work_dir = Path.cwd()
@@ -67,12 +75,20 @@ class WorkspaceIL:
             self.cfg.suite.task_make_fn.max_action_dim = (
                 self.expert_replay_loader.dataset._max_action_dim
             )
-        self.env, self.task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
-
-        # create agent
+        # Create a single probe env for specs before all eval render contexts exist.
+        original_eval = self.cfg.suite.task_make_fn.eval
+        self.cfg.suite.task_make_fn.eval = False
+        probe_env, _ = hydra.utils.call(self.cfg.suite.task_make_fn)
         self.agent = make_agent(
-            self.env[0].observation_spec(), self.env[0].action_spec(), cfg
+            probe_env[0].observation_spec(), probe_env[0].action_spec(), cfg
         )
+        close_envs(probe_env)
+        del probe_env
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        self.cfg.suite.task_make_fn.eval = original_eval
+        self.env, self.task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
 
         self.envs_till_idx = len(self.env)
         self.expert_replay_loader.dataset.envs_till_idx = self.envs_till_idx
