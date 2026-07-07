@@ -3,6 +3,7 @@
 import warnings
 import os
 import gc
+from types import SimpleNamespace
 
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 os.environ["MUJOCO_GL"] = "egl"
@@ -12,6 +13,8 @@ from pathlib import Path
 import hydra
 import torch
 import numpy as np
+from sentence_transformers import SentenceTransformer
+from libero.libero import benchmark
 
 import utils
 from logger import Logger
@@ -46,6 +49,41 @@ def close_envs(envs):
             close()
 
 
+class TextOnlyEvalDataset:
+    def __init__(self, cfg, stats):
+        self.stats = stats
+        self.envs_till_idx = 0
+
+        tasks_by_scene = {
+            task_name: scene[task_name]
+            for scene in cfg.suite.task.tasks
+            for task_name in scene
+        }
+        task_names = []
+        for scene in cfg.suite.task.scenes:
+            task_names.extend(tasks_by_scene[scene])
+
+        task_suite = benchmark.get_benchmark_dict()[cfg.suite.task.suite]()
+        suite_names = task_suite.get_task_names()
+        task_languages = []
+        for task_name in task_names:
+            task = task_suite.get_task(suite_names.index(task_name))
+            task_languages.append(task.language)
+
+        lang_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        self.task_embs = lang_model.encode(task_languages)
+        self.envs_till_idx = len(self.task_embs)
+
+    def sample_test(self, env_idx, step=None):
+        return {
+            "prompt_pixels": None,
+            "prompt_pixels_egocentric": None,
+            "prompt_proprioceptive": None,
+            "prompt_actions": None,
+            "task_emb": self.task_embs[env_idx],
+        }
+
+
 class WorkspaceIL:
     def __init__(self, cfg):
         self.work_dir = Path.cwd()
@@ -55,22 +93,43 @@ class WorkspaceIL:
         utils.set_seed_everywhere(cfg.seed)
         self.device = torch.device(cfg.device)
 
-        # load data
-        dataset_iterable = hydra.utils.call(self.cfg.expert_dataset)
-        self.expert_replay_loader = make_expert_replay_loader(
-            dataset_iterable, self.cfg.batch_size
-        )
-        self.expert_replay_iter = iter(self.expert_replay_loader)
+        bc_payload = None
+        if cfg.get("text_only_eval", False):
+            if cfg.prompt != "text":
+                raise ValueError("text_only_eval requires prompt=text")
+            if cfg.bc_weight is None:
+                raise ValueError("text_only_eval requires bc_weight")
+            bc_snapshot = Path(cfg.bc_weight)
+            if not bc_snapshot.exists():
+                raise FileNotFoundError(f"bc weight not found: {bc_snapshot}")
+            with bc_snapshot.open("rb") as f:
+                bc_payload = torch.load(f, map_location="cpu", weights_only=False)
+            dataset = TextOnlyEvalDataset(cfg, bc_payload["stats"])
+            self.expert_replay_loader = SimpleNamespace(dataset=dataset)
+            self.expert_replay_iter = None
+        else:
+            # load data
+            dataset_iterable = hydra.utils.call(self.cfg.expert_dataset)
+            self.expert_replay_loader = make_expert_replay_loader(
+                dataset_iterable, self.cfg.batch_size
+            )
+            self.expert_replay_iter = iter(self.expert_replay_loader)
 
         # create logger
         self.logger = Logger(self.work_dir, use_tb=self.cfg.use_tb)
         # create envs
-        self.cfg.suite.task_make_fn.max_episode_len = (
-            self.expert_replay_loader.dataset._max_episode_len
-        )
-        self.cfg.suite.task_make_fn.max_state_dim = (
-            self.expert_replay_loader.dataset._max_state_dim
-        )
+        if cfg.get("text_only_eval", False):
+            self.cfg.suite.task_make_fn.max_episode_len = bc_payload["max_episode_len"]
+            self.cfg.suite.task_make_fn.max_state_dim = bc_payload.get(
+                "max_state_dim", 100
+            )
+        else:
+            self.cfg.suite.task_make_fn.max_episode_len = (
+                self.expert_replay_loader.dataset._max_episode_len
+            )
+            self.cfg.suite.task_make_fn.max_state_dim = (
+                self.expert_replay_loader.dataset._max_state_dim
+            )
         if self.cfg.suite.name == "dmc":
             self.cfg.suite.task_make_fn.max_action_dim = (
                 self.expert_replay_loader.dataset._max_action_dim
@@ -102,7 +161,8 @@ class WorkspaceIL:
 
         self.envs_till_idx = self.expert_replay_loader.dataset.envs_till_idx
         self.expert_replay_loader.dataset.envs_till_idx = self.envs_till_idx
-        self.expert_replay_iter = iter(self.expert_replay_loader)
+        if not cfg.get("text_only_eval", False):
+            self.expert_replay_iter = iter(self.expert_replay_loader)
 
         self.timer = utils.Timer()
         self._global_step = 0

@@ -87,6 +87,14 @@ def parse_args():
         help="Evaluation episodes per LIBERO-90 task.",
     )
     parser.add_argument(
+        "--text-only-eval",
+        action="store_true",
+        help=(
+            "Evaluate prompt=text checkpoints without loading converted expert demos. "
+            "Task embeddings are generated from LIBERO language annotations."
+        ),
+    )
+    parser.add_argument(
         "--num-demos-per-task",
         type=int,
         default=50,
@@ -161,6 +169,8 @@ def eval_checkpoint(args, variant, step):
         "eval=true",
         f"bc_weight={snapshot}",
     ]
+    if args.text_only_eval:
+        cmd.append("text_only_eval=true")
     run_command(cmd, cwd=BAKU_DIR, dry_run=args.dry_run)
 
 
