@@ -87,6 +87,15 @@ class WorkspaceIL:
         gc.collect()
         torch.cuda.empty_cache()
 
+        self._snapshot_loaded = False
+        if cfg.bc_weight is not None:
+            bc_snapshot = Path(cfg.bc_weight)
+            if not bc_snapshot.exists():
+                raise FileNotFoundError(f"bc weight not found: {bc_snapshot}")
+            print(f"loading bc weight: {bc_snapshot}")
+            self.load_snapshot({"bc": bc_snapshot})
+            self._snapshot_loaded = True
+
         self.cfg.suite.task_make_fn.eval = original_eval
         self.env, self.task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
 
@@ -217,14 +226,15 @@ def main(cfg):
     workspace = W(cfg)
 
     # Load weights
-    snapshots = {}
-    # bc
-    bc_snapshot = Path(cfg.bc_weight)
-    if not bc_snapshot.exists():
-        raise FileNotFoundError(f"bc weight not found: {bc_snapshot}")
-    print(f"loading bc weight: {bc_snapshot}")
-    snapshots["bc"] = bc_snapshot
-    workspace.load_snapshot(snapshots)
+    if not workspace._snapshot_loaded:
+        snapshots = {}
+        # bc
+        bc_snapshot = Path(cfg.bc_weight)
+        if not bc_snapshot.exists():
+            raise FileNotFoundError(f"bc weight not found: {bc_snapshot}")
+        print(f"loading bc weight: {bc_snapshot}")
+        snapshots["bc"] = bc_snapshot
+        workspace.load_snapshot(snapshots)
 
     workspace.eval()
 
