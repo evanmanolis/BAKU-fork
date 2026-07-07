@@ -13,8 +13,10 @@ def make_expert_replay_loader(iterable, batch_size):
     loader = torch.utils.data.DataLoader(
         iterable,
         batch_size=batch_size,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True,
         worker_init_fn=_worker_init_fn,
     )
     return loader

@@ -8,6 +8,11 @@ This is a repository containing the code for the paper [BAKU: An Efficient Trans
 
 In order to install the required dependencies, please follow the instructions provide [here](Instructions.md).
 
+## Rational/MatrixPolicy LIBERO-90 Runs
+
+For the RationalOPT migration and LIBERO-90 comparison grid, see
+[docs/rational_migration.md](docs/rational_migration.md).
+
 ## Access to Datasets
 We have added the instructions for running BAKU on the LIBERO benchmark [here](Instructions.md). For access to the datasets for Meta-World, DMControl, and the real world xArm Kitchen, please send an email to the sh6474@nyu.edu. 
 

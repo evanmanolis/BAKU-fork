@@ -22,6 +22,36 @@ num_demos_per_task: 50
 encoder_type: 'resnet' # base, resnet
 policy_type: 'gpt' # mlp, gpt
 policy_head: deterministic # deterministic, gmm, bet, diffusion, vqbet
+policy_activation: gelu # gelu, rlb_fused_global_rational
+rational_group_size: 256
+rational_max_groups: 32
+rational_init: silu
+rational_eps: 1e-6
+actor_optimizer: adamw # adamw, rational_matrix_policy
+matrix_policy:
+  total_steps: ${suite.num_train_steps}
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1e-8
+  weight_decay_scale: 1.0
+  adam_lr_scale: 3.0
+  adam_role_strength: 1.2
+  muon_strength: 0.0
+  muon_lr_scale: 0.0
+  final_muon: 0.0
+  min_muon: 0.0
+  max_muon: 0.0
+  input_depth_gain: -0.5
+  output_depth_gain: 1.0
+  group_gain_strength: 0.2
+  group_pressure_strength: 0.1
+  group_activity_damping: 0.2
+  group_start: 0.02
+  group_end: 0.30
+  group_min_scale: 0.75
+  group_max_scale: 1.35
+  onpolicy_stat_decay: 0.95
+  stat_samples: 512
 use_proprio: true
 use_language: true
 use_actions: false

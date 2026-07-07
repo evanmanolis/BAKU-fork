@@ -41,6 +41,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from agent.networks.rational import RationalFusedGlobalFFN
+
 
 # @torch.jit.script # good to enable when not using torch.compile, disable when using (our default)
 def new_gelu(x):
@@ -115,18 +117,39 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, activation="gelu"):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        hidden_dim = int(config.mlp_hidden_mult * config.n_embd)
+        self.c_fc = nn.Linear(config.n_embd, hidden_dim)
+        self.c_proj = nn.Linear(hidden_dim, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
+        self.activation = activation
 
     def forward(self, x):
         x = self.c_fc(x)
-        x = new_gelu(x)
+        if self.activation == "gelu":
+            x = new_gelu(x)
+        elif self.activation == "relu":
+            x = F.relu(x)
+        else:
+            raise ValueError(f"unknown MLP activation: {self.activation}")
         x = self.c_proj(x)
         x = self.dropout(x)
         return x
+
+
+class RationalMLP(RationalFusedGlobalFFN):
+    def __init__(self, config):
+        hidden_dim = int(config.mlp_hidden_mult * config.n_embd)
+        super().__init__(
+            config.n_embd,
+            hidden_dim,
+            dropout=config.dropout,
+            rational_group_size=config.rational_group_size,
+            rational_max_groups=config.rational_max_groups,
+            rational_init=config.rational_init,
+            eps=config.rational_eps,
+        )
 
 
 class Block(nn.Module):
@@ -135,7 +158,12 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = MLP(config)
+        if config.activation in {"gelu", "relu"}:
+            self.mlp = MLP(config, activation=config.activation)
+        elif config.activation == "rlb_fused_global_rational":
+            self.mlp = RationalMLP(config)
+        else:
+            raise ValueError(f"unknown GPT activation: {config.activation}")
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
@@ -152,6 +180,12 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.1
+    activation: str = "gelu"
+    mlp_hidden_mult: float = 4.0
+    rational_group_size: int = 256
+    rational_max_groups: int = 32
+    rational_init: str = "silu"
+    rational_eps: float = 1e-6
 
 
 class GPT(nn.Module):
@@ -175,7 +209,7 @@ class GPT(nn.Module):
         # init all weights, and apply a special scaled init to the residual projections, per GPT-2 paper
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight"):
+            if pn.endswith("c_proj.weight") or pn.endswith("out_proj.weight"):
                 torch.nn.init.normal_(
                     p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer)
                 )

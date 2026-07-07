@@ -19,6 +19,7 @@ from agent.networks.policy_head import (
 from agent.networks.gpt import GPT, GPTConfig
 from agent.networks.mlp import MLP
 from agent.networks.kmeans_discretizer import KMeansDiscretizer
+from agent.optim import RationalMatrixPolicyOptimizer
 
 
 class Actor(nn.Module):
@@ -31,6 +32,11 @@ class Actor(nn.Module):
         policy_head="deterministic",
         num_feat_per_step=1,
         device="cuda",
+        policy_activation="gelu",
+        rational_group_size=256,
+        rational_max_groups=32,
+        rational_init="silu",
+        rational_eps=1e-6,
     ):
         super().__init__()
 
@@ -53,6 +59,11 @@ class Actor(nn.Module):
                     n_head=4,
                     n_embd=hidden_dim,
                     dropout=0.1,
+                    activation=policy_activation,
+                    rational_group_size=rational_group_size,
+                    rational_max_groups=rational_max_groups,
+                    rational_init=rational_init,
+                    rational_eps=rational_eps,
                 )
             )
         elif policy_type == "mlp":
@@ -154,6 +165,31 @@ class Actor(nn.Module):
             return pred_action, loss[0] if isinstance(loss, tuple) else loss
 
 
+class CompositeOptimizer:
+    def __init__(self, optimizers):
+        self.optimizers = list(optimizers)
+        self.param_groups = [
+            group for optimizer in self.optimizers for group in optimizer.param_groups
+        ]
+
+    def zero_grad(self, set_to_none=True):
+        for optimizer in self.optimizers:
+            optimizer.zero_grad(set_to_none=set_to_none)
+
+    def step(self):
+        for optimizer in self.optimizers:
+            optimizer.step()
+
+    def state_dict(self):
+        return {"optimizers": [optimizer.state_dict() for optimizer in self.optimizers]}
+
+    def load_state_dict(self, state_dict):
+        for optimizer, optimizer_state in zip(
+            self.optimizers, state_dict["optimizers"]
+        ):
+            optimizer.load_state_dict(optimizer_state)
+
+
 class BCAgent:
     def __init__(
         self,
@@ -186,6 +222,13 @@ class BCAgent:
         prompt,
         use_language,
         film,
+        policy_activation="gelu",
+        rational_group_size=256,
+        rational_max_groups=32,
+        rational_init="silu",
+        rational_eps=1e-6,
+        actor_optimizer="adamw",
+        matrix_policy=None,
     ):
         self.device = device
         self.lr = lr
@@ -207,6 +250,13 @@ class BCAgent:
         self.language_proj_type = "mlp"  # mlp or identity
         self.prompt = prompt
         self.film = film
+        self.policy_activation = policy_activation
+        self.rational_group_size = rational_group_size
+        self.rational_max_groups = rational_max_groups
+        self.rational_init = rational_init
+        self.rational_eps = rational_eps
+        self.actor_optimizer = actor_optimizer
+        self.matrix_policy = matrix_policy if matrix_policy is not None else {}
 
         # language
         self.language_fusion = "none" if not self.use_language else "film"
@@ -361,6 +411,11 @@ class BCAgent:
             self.policy_head,
             num_feat_per_step,
             device,
+            policy_activation,
+            rational_group_size,
+            rational_max_groups,
+            rational_init,
+            rational_eps,
         ).to(device)
         model_size += sum(p.numel() for p in self.actor.parameters() if p.requires_grad)
 
@@ -385,9 +440,7 @@ class BCAgent:
                 self.language_projector.parameters(), lr=lr, weight_decay=1e-4
             )
         # actor
-        self.actor_opt = torch.optim.AdamW(
-            self.actor.parameters(), lr=lr, weight_decay=1e-4
-        )
+        self.actor_opt = self._make_actor_optimizer()
 
         # augmentations
         if obs_type == "pixels" and self.norm:
@@ -495,6 +548,203 @@ class BCAgent:
 
         print("Discretization complete.")
 
+    @staticmethod
+    def _cfg_get(cfg, key, default):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
+
+    def _collect_rlb_matrix_groups(self):
+        groups = []
+        policy = getattr(self.actor, "_policy", None)
+        if policy is None or not hasattr(policy, "transformer"):
+            return groups
+
+        blocks = policy.transformer.h
+        num_layers = len(blocks)
+        for layer_index, block in enumerate(blocks):
+            mlp = getattr(block, "mlp", None)
+            activation = getattr(mlp, "rlb_activation", None)
+            in_proj = getattr(mlp, "in_proj", None)
+            out_proj = getattr(mlp, "out_proj", None)
+            if activation is None or in_proj is None or out_proj is None:
+                continue
+            required = ("groups", "hidden_dim", "numerator", "denominator")
+            if not all(hasattr(activation, attr) for attr in required):
+                continue
+            hidden_dim = int(activation.hidden_dim)
+            if in_proj.weight.shape[0] != hidden_dim:
+                continue
+            if out_proj.weight.shape[1] != hidden_dim:
+                continue
+            setattr(activation, "_rlb_optimizer_track_stats", True)
+            setattr(
+                activation,
+                "_rlb_optimizer_stat_samples",
+                int(self._cfg_get(self.matrix_policy, "stat_samples", 512)),
+            )
+            groups.append(
+                {
+                    "module": activation,
+                    "in_weight": in_proj.weight,
+                    "out_weight": out_proj.weight,
+                    "numerator": activation.numerator,
+                    "denominator": activation.denominator,
+                    "groups": int(activation.groups),
+                    "hidden_dim": hidden_dim,
+                    "layer_index": layer_index,
+                    "num_layers": num_layers,
+                }
+            )
+        return groups
+
+    def _make_actor_optimizer(self):
+        weight_decay = 1e-4
+        if self.actor_optimizer == "adamw":
+            return torch.optim.AdamW(
+                self.actor.parameters(), lr=self.lr, weight_decay=weight_decay
+            )
+        if self.actor_optimizer != "rational_matrix_policy":
+            raise ValueError(
+                "actor_optimizer must be 'adamw' or 'rational_matrix_policy', "
+                f"got {self.actor_optimizer!r}"
+            )
+
+        rlb_groups = self._collect_rlb_matrix_groups()
+        if not rlb_groups:
+            raise ValueError(
+                "actor_optimizer='rational_matrix_policy' requires "
+                "policy_activation='rlb_fused_global_rational'"
+            )
+
+        matrix_param_ids = set()
+        matrix_groups = []
+        selector_groups = []
+        for selector_index, group in enumerate(rlb_groups):
+            matrix_param_ids.add(id(group["in_weight"]))
+            matrix_param_ids.add(id(group["out_weight"]))
+            selector_groups.append(group)
+            common = {
+                "weight_decay": weight_decay
+                * float(self._cfg_get(self.matrix_policy, "weight_decay_scale", 1.0)),
+                "layer_index": int(group["layer_index"]),
+                "num_layers": int(group["num_layers"]),
+                "selector_index": selector_index,
+            }
+            matrix_groups.append(
+                {
+                    "params": [group["in_weight"]],
+                    "matrix_role": "in",
+                    **common,
+                }
+            )
+            matrix_groups.append(
+                {
+                    "params": [group["out_weight"]],
+                    "matrix_role": "out",
+                    **common,
+                }
+            )
+
+        self._rlb_optimizer_groups = selector_groups
+        other_params = [
+            param
+            for param in self.actor.parameters()
+            if param.requires_grad and id(param) not in matrix_param_ids
+        ]
+        optimizers = []
+        if other_params:
+            optimizers.append(
+                torch.optim.AdamW(other_params, lr=self.lr, weight_decay=weight_decay)
+            )
+        optimizers.append(
+            RationalMatrixPolicyOptimizer(
+                matrix_groups,
+                lr=self.lr,
+                betas=(
+                    float(self._cfg_get(self.matrix_policy, "beta1", 0.9)),
+                    float(self._cfg_get(self.matrix_policy, "beta2", 0.95)),
+                ),
+                eps=float(self._cfg_get(self.matrix_policy, "eps", 1e-8)),
+                weight_decay=weight_decay,
+                total_steps=int(self._cfg_get(self.matrix_policy, "total_steps", 0)),
+                selector_groups=selector_groups,
+                muon_strength=float(self._cfg_get(self.matrix_policy, "muon_strength", 0.0)),
+                muon_lr_scale=float(self._cfg_get(self.matrix_policy, "muon_lr_scale", 0.0)),
+                adam_lr_scale=float(self._cfg_get(self.matrix_policy, "adam_lr_scale", 3.0)),
+                adam_role_strength=float(self._cfg_get(self.matrix_policy, "adam_role_strength", 1.20)),
+                final_muon=float(self._cfg_get(self.matrix_policy, "final_muon", 0.0)),
+                min_muon=float(self._cfg_get(self.matrix_policy, "min_muon", 0.0)),
+                max_muon=float(self._cfg_get(self.matrix_policy, "max_muon", 0.0)),
+                input_depth_gain=float(self._cfg_get(self.matrix_policy, "input_depth_gain", -0.50)),
+                output_depth_gain=float(self._cfg_get(self.matrix_policy, "output_depth_gain", 1.00)),
+                group_gain_strength=float(self._cfg_get(self.matrix_policy, "group_gain_strength", 0.20)),
+                group_pressure_strength=float(self._cfg_get(self.matrix_policy, "group_pressure_strength", 0.10)),
+                group_activity_damping=float(self._cfg_get(self.matrix_policy, "group_activity_damping", 0.20)),
+                group_start=float(self._cfg_get(self.matrix_policy, "group_start", 0.02)),
+                group_end=float(self._cfg_get(self.matrix_policy, "group_end", 0.30)),
+                group_min_scale=float(self._cfg_get(self.matrix_policy, "group_min_scale", 0.75)),
+                group_max_scale=float(self._cfg_get(self.matrix_policy, "group_max_scale", 1.35)),
+            )
+        )
+        return CompositeOptimizer(optimizers)
+
+    def _update_rlb_onpolicy_stats(self):
+        groups = getattr(self, "_rlb_optimizer_groups", None)
+        if not groups:
+            return
+        decay = float(self._cfg_get(self.matrix_policy, "onpolicy_stat_decay", 0.95))
+        decay = min(0.999, max(0.0, decay))
+        eps = float(self._cfg_get(self.matrix_policy, "eps", 1e-8))
+
+        for group in groups:
+            group_count = int(group["groups"])
+            hidden_dim = int(group["hidden_dim"])
+            width = hidden_dim // group_count
+            in_grad = group["in_weight"].grad
+            out_grad = group["out_weight"].grad
+            if in_grad is None or out_grad is None:
+                continue
+
+            in_rel = torch.sqrt(
+                in_grad.detach().float().view(group_count, width, -1).square().mean(dim=(1, 2))
+                + eps
+            )
+            out_rel = torch.sqrt(
+                out_grad.detach()
+                .float()
+                .view(out_grad.shape[0], group_count, width)
+                .permute(1, 2, 0)
+                .square()
+                .mean(dim=(1, 2))
+                + eps
+            )
+            rat_grads = []
+            for key in ("numerator", "denominator"):
+                grad = group[key].grad
+                if grad is not None:
+                    rat_grads.append(grad.detach().float().view(group_count, -1))
+            if rat_grads:
+                rat_rel = torch.sqrt(
+                    torch.cat(rat_grads, dim=1).square().mean(dim=1) + eps
+                )
+            else:
+                rat_rel = torch.ones_like(in_rel) * eps
+
+            state = group.get("_onpolicy")
+            if state is None:
+                group["_onpolicy"] = {
+                    "in_rel_ema": in_rel,
+                    "out_rel_ema": out_rel,
+                    "rat_rel_ema": rat_rel,
+                }
+            else:
+                state["in_rel_ema"].mul_(decay).add_(in_rel, alpha=1.0 - decay)
+                state["out_rel_ema"].mul_(decay).add_(out_rel, alpha=1.0 - decay)
+                state["rat_rel_ema"].mul_(decay).add_(rat_rel, alpha=1.0 - decay)
+
     def reinit_optimizers(self):
         if self.train_encoder:
             if self.separate_encoders:
@@ -512,10 +762,7 @@ class BCAgent:
             self.language_opt = torch.optim.AdamW(
                 self.language_projector.parameters(), lr=self.lr, weight_decay=1e-4
             )
-        params = list(self.actor.parameters())
-        self.actor_opt = torch.optim.AdamW(
-            self.actor.parameters(), lr=self.lr, weight_decay=1e-4
-        )
+        self.actor_opt = self._make_actor_optimizer()
 
     def act(self, obs, prompt, norm_stats, step, global_step, eval_mode=False):
         if norm_stats is not None:
@@ -699,19 +946,20 @@ class BCAgent:
                 pixel = self.customAug(pixel / 255.0) if self.norm else pixel
                 # encode
                 lang = lang_features if self.film else None
-                if self.train_encoder:
-                    pixel = (
-                        self.encoder[key](pixel, lang=lang)
-                        if self.separate_encoders
-                        else self.encoder(pixel, lang=lang)
-                    )
-                else:
-                    with torch.no_grad():
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    if self.train_encoder:
                         pixel = (
                             self.encoder[key](pixel, lang=lang)
                             if self.separate_encoders
                             else self.encoder(pixel, lang=lang)
                         )
+                    else:
+                        with torch.no_grad():
+                            pixel = (
+                                self.encoder[key](pixel, lang=lang)
+                                if self.separate_encoders
+                                else self.encoder(pixel, lang=lang)
+                            )
                 pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
                 features.append(pixel)
             if self.use_proprio:
@@ -763,19 +1011,20 @@ class BCAgent:
                     # augment
                     pixel = self.customAug(pixel / 255.0) if self.norm else pixel
                     # encode
-                    if self.train_encoder:
-                        pixel = (
-                            self.encoder[key](pixel, lang=prompt_lang_features)
-                            if self.separate_encoders
-                            else self.encoder(pixel, lang=prompt_lang_features)
-                        )
-                    else:
-                        with torch.no_grad():
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        if self.train_encoder:
                             pixel = (
                                 self.encoder[key](pixel, lang=prompt_lang_features)
                                 if self.separate_encoders
                                 else self.encoder(pixel, lang=prompt_lang_features)
                             )
+                        else:
+                            with torch.no_grad():
+                                pixel = (
+                                    self.encoder[key](pixel, lang=prompt_lang_features)
+                                    if self.separate_encoders
+                                    else self.encoder(pixel, lang=prompt_lang_features)
+                                )
                     pixel = einops.rearrange(pixel, "(b t) d -> b t d", t=shape[1])
                     prompt_features.append(pixel)
                 if self.use_proprio:
@@ -810,9 +1059,10 @@ class BCAgent:
         if update:
             # actor loss
             stddev = utils.schedule(self.stddev_schedule, step)
-            _, actor_loss = self.actor(
-                features, num_prompt_feats, stddev, action, **kwargs
-            )
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                _, actor_loss = self.actor(
+                    features, num_prompt_feats, stddev, action, **kwargs
+                )
 
             if self.train_encoder:
                 self.encoder_opt.zero_grad(set_to_none=True)
@@ -822,6 +1072,7 @@ class BCAgent:
                 self.language_opt.zero_grad(set_to_none=True)
             self.actor_opt.zero_grad(set_to_none=True)
             actor_loss["actor_loss"].backward()
+            self._update_rlb_onpolicy_stats()
             if self.train_encoder:
                 self.encoder_opt.step()
             if self.obs_type == "pixels" and self.use_proprio:
@@ -841,9 +1092,10 @@ class BCAgent:
 
         else:
             stddev = utils.schedule(self.stddev_schedule, step)
-            pred_action, actor_loss = self.actor(
-                features, num_prompt_feats, stddev, action, **kwargs
-            )
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                pred_action, actor_loss = self.actor(
+                    features, num_prompt_feats, stddev, action, **kwargs
+                )
 
             if self.use_tb:
                 for key, value in actor_loss.items():

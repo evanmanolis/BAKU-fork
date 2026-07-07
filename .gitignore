@@ -77,6 +77,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+*.ipynb
 
 # IPython
 profile_default/
@@ -162,6 +163,9 @@ cython_debug/
 #.idea/
 
 # ignore
+.external/
+.DS_Store
+**/.DS_Store
 */__pycache__/
 */*/__pycache__/
 */*/*/__pycache__/
