@@ -97,9 +97,10 @@ class WorkspaceIL:
             self._snapshot_loaded = True
 
         self.cfg.suite.task_make_fn.eval = original_eval
-        self.env, self.task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
+        self.env = []
+        self.task_descriptions = []
 
-        self.envs_till_idx = len(self.env)
+        self.envs_till_idx = self.expert_replay_loader.dataset.envs_till_idx
         self.expert_replay_loader.dataset.envs_till_idx = self.envs_till_idx
         self.expert_replay_iter = iter(self.expert_replay_loader)
 
@@ -110,6 +111,15 @@ class WorkspaceIL:
         self.video_recorder = VideoRecorder(
             self.work_dir if self.cfg.save_video else None
         )
+
+    def make_eval_env(self, env_idx):
+        original_only_env_idx = self.cfg.suite.task_make_fn.only_env_idx
+        self.cfg.suite.task_make_fn.only_env_idx = env_idx
+        try:
+            env, task_descriptions = hydra.utils.call(self.cfg.suite.task_make_fn)
+        finally:
+            self.cfg.suite.task_make_fn.only_env_idx = original_only_env_idx
+        return env[0], task_descriptions
 
     @property
     def global_step(self):
@@ -129,56 +139,61 @@ class WorkspaceIL:
         successes = []
         for env_idx in range(self.envs_till_idx):
             print(f"evaluating env {env_idx}")
-            episode, total_reward = 0, 0
-            eval_until_episode = utils.Until(self.cfg.suite.num_eval_episodes)
-            success = []
+            env = None
+            try:
+                env, _ = self.make_eval_env(env_idx)
+                episode, total_reward = 0, 0
+                eval_until_episode = utils.Until(self.cfg.suite.num_eval_episodes)
+                success = []
 
-            while eval_until_episode(episode):
-                time_step = self.env[env_idx].reset()
-                self.agent.buffer_reset()
-                step = 0
+                while eval_until_episode(episode):
+                    time_step = env.reset()
+                    self.agent.buffer_reset()
+                    step = 0
 
-                # prompt
-                if self.cfg.prompt != None and self.cfg.prompt != "intermediate_goal":
-                    prompt = self.expert_replay_loader.dataset.sample_test(env_idx)
-                else:
-                    prompt = None
+                    # prompt
+                    if self.cfg.prompt != None and self.cfg.prompt != "intermediate_goal":
+                        prompt = self.expert_replay_loader.dataset.sample_test(env_idx)
+                    else:
+                        prompt = None
 
-                if episode == 0:
-                    self.video_recorder.init(self.env[env_idx], enabled=True)
+                    if episode == 0:
+                        self.video_recorder.init(env, enabled=True)
 
-                # plot obs with cv2
-                while not time_step.last():
-                    if self.cfg.prompt == "intermediate_goal":
-                        prompt = self.expert_replay_loader.dataset.sample_test(
-                            env_idx, step
-                        )
-                    with torch.no_grad(), utils.eval_mode(self.agent):
-                        action = self.agent.act(
-                            time_step.observation,
-                            prompt,
-                            self.expert_replay_loader.dataset.stats,
-                            step,
-                            self.global_step,
-                            eval_mode=True,
-                        )
-                    time_step = self.env[env_idx].step(action)
-                    self.video_recorder.record(self.env[env_idx])
-                    total_reward += time_step.reward
-                    step += 1
+                    # plot obs with cv2
+                    while not time_step.last():
+                        if self.cfg.prompt == "intermediate_goal":
+                            prompt = self.expert_replay_loader.dataset.sample_test(
+                                env_idx, step
+                            )
+                        with torch.no_grad(), utils.eval_mode(self.agent):
+                            action = self.agent.act(
+                                time_step.observation,
+                                prompt,
+                                self.expert_replay_loader.dataset.stats,
+                                step,
+                                self.global_step,
+                                eval_mode=True,
+                            )
+                        time_step = env.step(action)
+                        self.video_recorder.record(env)
+                        total_reward += time_step.reward
+                        step += 1
 
-                    if self.cfg.suite.name == "calvin" and time_step.reward == 1:
-                        self.agent.buffer_reset()
+                        if self.cfg.suite.name == "calvin" and time_step.reward == 1:
+                            self.agent.buffer_reset()
 
-                episode += 1
-                success.append(time_step.observation["goal_achieved"])
-            self.video_recorder.save(f"{self.global_frame}_env{env_idx}.mp4")
-            episode_rewards.append(total_reward / episode)
-            successes.append(np.mean(success))
-
-        for _ in range(len(self.env) - self.envs_till_idx):
-            episode_rewards.append(0)
-            successes.append(0)
+                    episode += 1
+                    success.append(time_step.observation["goal_achieved"])
+                self.video_recorder.save(f"{self.global_frame}_env{env_idx}.mp4")
+                episode_rewards.append(total_reward / episode)
+                successes.append(np.mean(success))
+            finally:
+                if env is not None:
+                    close_envs([env])
+                    del env
+                gc.collect()
+                torch.cuda.empty_cache()
 
         with self.logger.log_and_dump_ctx(self.global_frame, ty="eval") as log:
             for env_idx, reward in enumerate(episode_rewards):

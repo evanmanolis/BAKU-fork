@@ -45,3 +45,4 @@ task_make_fn:
   max_episode_len: ??? # to be specified later
   max_state_dim: ??? # to be specified later
   eval: ${eval}
+  only_env_idx: null

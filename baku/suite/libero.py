@@ -384,6 +384,7 @@ def make(
     max_episode_len,
     max_state_dim,
     eval,
+    only_env_idx=None,
 ):
     # Convert task_names, which is a list, to a dictionary
     tasks = {task_name: scene[task_name] for scene in tasks for task_name in scene}
@@ -394,9 +395,13 @@ def make(
     task_suite = benchmark_dict[suite]()
     idx2name = {}
     idx = 0
+    task_idx = 0
     for scene in scenes:
         for task_name in tasks[scene]:
             if task_name in task_suite.get_task_names():
+                if only_env_idx is not None and task_idx != only_env_idx:
+                    task_idx += 1
+                    continue
                 # get task id from list of task names
                 task_id = task_suite.get_task_names().index(task_name)
                 # create environment
@@ -432,8 +437,12 @@ def make(
 
                 idx2name[idx] = task_name
                 idx += 1
+                task_idx += 1
             else:
                 for task_id in range(task_suite.get_num_tasks()):
+                    if only_env_idx is not None and task_idx != only_env_idx:
+                        task_idx += 1
+                        continue
                     task = task_suite.get_task(task_id)
                     task_name = task.name
                     task_descriptions.append(task.language)
@@ -464,6 +473,7 @@ def make(
                     env = ExtendedTimeStepWrapper(env)
 
                     envs.append(env)
+                    task_idx += 1
 
                     if not eval:
                         break
@@ -472,11 +482,13 @@ def make(
                 break
         if not eval:
             break
+    if only_env_idx is not None and not envs:
+        raise IndexError(f"only_env_idx {only_env_idx} did not match any LIBERO task")
 
-        # write task descriptions to file
-        if eval:
-            with open("task_names_env.txt", "w") as f:
-                for idx in idx2name:
-                    f.write(f"{idx}: {idx2name[idx]}\n")
+    # write task descriptions to file
+    if eval and only_env_idx is None:
+        with open("task_names_env.txt", "w") as f:
+            for idx in idx2name:
+                f.write(f"{idx}: {idx2name[idx]}\n")
 
     return envs, task_descriptions
