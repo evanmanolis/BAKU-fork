@@ -2,6 +2,7 @@
 
 import warnings
 import os
+import gc
 
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 os.environ["MUJOCO_GL"] = "egl"
@@ -32,6 +33,13 @@ def make_agent(obs_spec, action_spec, cfg):
     cfg.agent.obs_shape = obs_shape
     cfg.agent.action_shape = action_spec.shape
     return hydra.utils.instantiate(cfg.agent)
+
+
+def close_envs(envs):
+    for env in envs:
+        close = getattr(env, "close", None)
+        if close is not None:
+            close()
 
 
 class WorkspaceIL:
@@ -73,6 +81,12 @@ class WorkspaceIL:
         )
 
         self.envs_till_idx = self.expert_replay_loader.dataset.envs_till_idx
+        if not self.cfg.eval:
+            close_envs(self.env)
+            self.env = []
+            self.task_descriptions = []
+            gc.collect()
+            torch.cuda.empty_cache()
 
         # Discretizer for BeT
         if repr(self.agent) != "mtact":
