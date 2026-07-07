@@ -67,6 +67,7 @@ num_queries: 10
 # expert dataset
 expert_dataset: ${dataloader.bc_dataset}
 text_only_eval: false
+text_only_max_state_dim: 123
 
 # Load weights
 bc_weight: path/to/weight
