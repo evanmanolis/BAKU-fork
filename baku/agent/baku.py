@@ -1084,9 +1084,8 @@ class BCAgent:
             if self.policy_head == "diffusion" and step % 10 == 0:
                 self.actor._action_head.net.ema_step()
 
-            if self.use_tb:
-                for key, value in actor_loss.items():
-                    metrics[key] = value.item()
+            for key, value in actor_loss.items():
+                metrics[key] = value.item()
 
             return metrics
 
@@ -1097,9 +1096,8 @@ class BCAgent:
                     features, num_prompt_feats, stddev, action, **kwargs
                 )
 
-            if self.use_tb:
-                for key, value in actor_loss.items():
-                    metrics[key] = value.item()
+            for key, value in actor_loss.items():
+                metrics[key] = value.item()
             metrics["gt_action"] = action.cpu().numpy()
             # predicted action
             if self.policy_head == "bet":
