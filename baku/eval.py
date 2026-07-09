@@ -120,8 +120,12 @@ class WorkspaceIL:
         # create envs
         if cfg.get("text_only_eval", False):
             self.cfg.suite.task_make_fn.max_episode_len = bc_payload["max_episode_len"]
-            self.cfg.suite.task_make_fn.max_state_dim = bc_payload.get(
-                "max_state_dim", cfg.text_only_max_state_dim
+            # The live sim state must fit in the feature buffer; never let a
+            # smaller stale value stored in the checkpoint override the
+            # configured width (the policy ignores this buffer in pixels mode).
+            payload_state_dim = bc_payload.get("max_state_dim") or 0
+            self.cfg.suite.task_make_fn.max_state_dim = max(
+                int(payload_state_dim), int(cfg.text_only_max_state_dim)
             )
         else:
             self.cfg.suite.task_make_fn.max_episode_len = (

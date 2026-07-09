@@ -35,6 +35,10 @@ matrix_policy:
   eps: 1e-8
   weight_decay_scale: 1.0
   adam_lr_scale: 3.0
+  adam_lr_scale_final: null # e.g. 1.0 anneals the matrix LR multiplier late in training
+  adam_decay_start: 1.1 # progress fraction where the anneal begins (>1.0 disables)
+  adam_decay_end: 1.1 # progress fraction where the anneal completes
+  adam_decay_depth_shift: 0.0
   adam_role_strength: 1.2
   muon_strength: 0.0
   muon_lr_scale: 0.0

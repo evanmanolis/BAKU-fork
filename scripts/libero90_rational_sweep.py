@@ -28,6 +28,27 @@ VARIANTS = {
         "policy_activation": "rlb_fused_global_rational",
         "actor_optimizer": "rational_matrix_policy",
     },
+    # Ablation A: anneal the matrix LR multiplier 3x -> 1x over steps
+    # 60k-95k (progress 0.60-0.95 of 100k) to mimic the reference repo's
+    # cosine tail, testing whether the unannealed 3x LR causes the 100k drop.
+    "rlb_matrix_policy_decay": {
+        "policy_activation": "rlb_fused_global_rational",
+        "actor_optimizer": "rational_matrix_policy",
+        "extra_overrides": [
+            "matrix_policy.adam_lr_scale_final=1.0",
+            "matrix_policy.adam_decay_start=0.60",
+            "matrix_policy.adam_decay_end=0.95",
+        ],
+    },
+    # Ablation B: keep MatrixPolicy's role/group shaping but remove the 3x
+    # LR boost entirely, separating LR magnitude from the shaping policy.
+    "rlb_matrix_policy_flat": {
+        "policy_activation": "rlb_fused_global_rational",
+        "actor_optimizer": "rational_matrix_policy",
+        "extra_overrides": [
+            "matrix_policy.adam_lr_scale=1.0",
+        ],
+    },
 }
 
 
@@ -107,6 +128,12 @@ def parse_args():
         help="Training demos per LIBERO-90 task.",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=2,
+        help="Training/eval seed, recorded explicitly in hydra overrides.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print commands without executing them.",
@@ -122,6 +149,7 @@ def hydra_overrides(args, variant, run_dir):
         "dataloader=libero",
         "suite/task=libero_90",
         f"root_dir={REPO_ROOT}",
+        f"seed={args.seed}",
         "suite.hidden_dim=256",
         f"suite.num_train_steps={args.num_train_steps}",
         f"suite.save_every_steps={args.save_every_steps}",
@@ -138,6 +166,7 @@ def hydra_overrides(args, variant, run_dir):
         "num_queries=10",
         f"policy_activation={settings['policy_activation']}",
         f"actor_optimizer={settings['actor_optimizer']}",
+        *settings.get("extra_overrides", []),
         f"experiment_label={variant}",
         f"hydra.run.dir={run_dir}",
     ]

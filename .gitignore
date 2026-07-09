@@ -175,3 +175,8 @@ cython_debug/
 */*/weights/
 expert_demos/
 */exp_local/
+exp_local/
+
+# Lambda run artifacts (checkpoints + eval outputs synced from instances)
+lambda_results/
+*.pt

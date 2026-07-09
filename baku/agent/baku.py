@@ -659,6 +659,9 @@ class BCAgent:
             optimizers.append(
                 torch.optim.AdamW(other_params, lr=self.lr, weight_decay=weight_decay)
             )
+        adam_lr_scale_final = self._cfg_get(self.matrix_policy, "adam_lr_scale_final", None)
+        if adam_lr_scale_final is not None:
+            adam_lr_scale_final = float(adam_lr_scale_final)
         optimizers.append(
             RationalMatrixPolicyOptimizer(
                 matrix_groups,
@@ -674,6 +677,10 @@ class BCAgent:
                 muon_strength=float(self._cfg_get(self.matrix_policy, "muon_strength", 0.0)),
                 muon_lr_scale=float(self._cfg_get(self.matrix_policy, "muon_lr_scale", 0.0)),
                 adam_lr_scale=float(self._cfg_get(self.matrix_policy, "adam_lr_scale", 3.0)),
+                adam_lr_scale_final=adam_lr_scale_final,
+                adam_decay_start=float(self._cfg_get(self.matrix_policy, "adam_decay_start", 1.1)),
+                adam_decay_end=float(self._cfg_get(self.matrix_policy, "adam_decay_end", 1.1)),
+                adam_decay_depth_shift=float(self._cfg_get(self.matrix_policy, "adam_decay_depth_shift", 0.0)),
                 adam_role_strength=float(self._cfg_get(self.matrix_policy, "adam_role_strength", 1.20)),
                 final_muon=float(self._cfg_get(self.matrix_policy, "final_muon", 0.0)),
                 min_muon=float(self._cfg_get(self.matrix_policy, "min_muon", 0.0)),

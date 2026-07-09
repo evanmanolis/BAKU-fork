@@ -233,6 +233,9 @@ class WorkspaceIL:
         self.agent.clear_buffers()
         keys_to_save = ["timer", "_global_step", "_global_episode", "stats"]
         payload = {k: self.__dict__[k] for k in keys_to_save}
+        # Self-describing checkpoints: text-only eval reads this back instead
+        # of relying on the configured text_only_max_state_dim fallback.
+        payload["max_state_dim"] = self.expert_replay_loader.dataset._max_state_dim
         payload.update(self.agent.save_snapshot())
         with snapshot.open("wb") as f:
             torch.save(payload, f)
